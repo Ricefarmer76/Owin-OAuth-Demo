@@ -1,0 +1,151 @@
+﻿gpodawund  
+
+First try out the gate sort of kludgy
+
+Lets seperate some stuff
+
+There is a good article in self hosting WebApi in Owin framework but with no discussion on security
+This just speaks of a console app for hosting without IIS but has no OAuth2 info.
+https://docs.microsoft.com/en-us/aspnet/web-api/overview/hosting-aspnet-web-api/use-owin-to-self-host-web-api
+
+So removing fluff and scaffolding... a blank Asp.Net project.  We will host using Owin.  We will authenticate with our own OAuth server
+
+
+References:
+Microsoft.AspNet.WebApi.Owin 5.2.3   - For hosting WebApi in Owin environment
+Microsoft.Owin.Host.SystemWeb  3.1.0 - OWIN server that enables OWIN-based applications to run on IIS using the ASP.NET request pipeline.
+Microsoft ASP.NET Identity Owin      - Asp.Net Identity provider.  Key is Microsoft.Owin.Security.OAuth (>= 2.1.0)  We are going to do token route
+
+
+
+Obviously, we need a user.  I am faking the user for this initial run.  The basics of user:
+In Model Folder:
+
+   public class User
+    {
+        public string Id { get; set; }
+        public string Name { get; set; }
+        public string Email { get; set; }
+        public string Password { get; set; }
+    }
+
+TODO -  Roles?   Could add a field to the User class but probably better to take the OAuth claim and look up in database for authorized role.
+
+
+Next is a copy and paste rip-off of the boiler-plate OAuthProvider from a templated Asp.Net WebApi project... I started with a blank project so, I borrow
+Add Provider folder to project and class
+Add provider class:
+
+    public class OAuthAppProvider : OAuthAuthorizationServerProvider
+    {
+        public override Task GrantResourceOwnerCredentials(OAuthGrantResourceOwnerCredentialsContext context)
+        {
+            return Task.Factory.StartNew(() =>
+            {
+                var username = context.UserName;
+                var password = context.Password;
+                var userService = new UserService();
+                User user = userService.GetUserByCredentials(username, password);
+                if (user != null)
+                {
+                    var claims = new List<Claim>()
+                    {
+                        new Claim(ClaimTypes.Name, user.Name),
+                        new Claim("UserID", user.Id)
+                    };
+
+                    ClaimsIdentity oAutIdentity = new ClaimsIdentity(claims, Startup.OAuthOptions.AuthenticationType);
+                    context.Validated(new AuthenticationTicket(oAutIdentity, new AuthenticationProperties() { }));
+                }
+                else
+                {
+                    context.SetError("invalid_grant", "Error");
+                }
+            });
+        }
+
+        public override Task ValidateClientAuthentication(OAuthValidateClientAuthenticationContext context)
+        {
+            if (context.ClientId == null)
+            {
+                context.Validated();
+            }
+            return Task.FromResult<object>(null);
+        }
+    }
+    
+    
+    Start this OAuth in   partial class for startup
+    
+    public partial class Startup
+    {
+        public void Configuration(IAppBuilder app)
+        {
+            ConfigureAuth(app);
+        }
+    }
+    
+    
+    
+    And another part of startup class in app start folder for kicking off OAuth for the application
+    
+    public partial class Startup
+    {
+        public static OAuthAuthorizationServerOptions OAuthOptions { get; private set; }
+
+        static Startup()
+        {
+            OAuthOptions = new OAuthAuthorizationServerOptions
+            {
+                TokenEndpointPath = new PathString("/token"),
+                Provider = new OAuthAppProvider(),
+                AccessTokenExpireTimeSpan = TimeSpan.FromDays(2),
+                AllowInsecureHttp = true
+            };
+        }
+
+        public void ConfigureAuth(IAppBuilder app)
+        {
+            app.UseOAuthBearerTokens(OAuthOptions);
+        }
+    }
+
+
+Now an extension to Owin allows pulling the context and user info.  
+This gets you the context of the logged on user.
+Context might have role in the future or role may come from email address as a foreign key into a database table
+
+   public static class OwinContextExtensions
+    {
+        public static string GetUserId(this IOwinContext ctx)
+        {
+            var result = "-1";
+            var claim = ctx.Authentication.User.Claims.FirstOrDefault(c => c.Type == "UserID");
+            if (claim != null)
+            {
+                result = claim.Value;
+            }
+            return result;
+        }
+    }
+    
+    
+    
+    There is no index page for this so start and  ignore the web browser error you get when the index page is not found.  
+    Your app is running and listening for a post login.
+    
+    Use Postmon or Fiddler to make a call.  Any username password will work...  You will get the one and only user from our fake server that validates login
+    
+    Your post for login looks like this: (replace with your localhost port)
+    
+   	POST https://localhost:49955/Token HTTP/1.1
+		Host: localhost:44305
+		User-Agent: Mozilla/5.0 (Windows NT 6.3; WOW64; rv:32.0) Gecko/20100101 Firefox/32.0
+		Accept: */*
+		Content-Type: application/x-www-form-urlencoded; charset=UTF-8
+		X-Requested-With: XMLHttpRequest
+		Referer: https://localhost:49955/
+		Content-Length: 68
+
+		grant_type=password&username=KindlyVet%40AcmeAnimalClinic.com&password=Beagle1
+    
